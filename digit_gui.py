@@ -19,6 +19,73 @@ def app_path(filename):
     return APP_DIR + "/" + filename
 
 
+class LogisticRegression:
+    def __init__(self, lr=0.01, max_iter=2000, C=1.0,
+                 tol=1e-6, fit_intercept=True,
+                 penalty="l2", random_state=None,
+                 solver=None):
+        self.lr = lr
+        self.max_iter = max_iter
+        self.C = C
+        self.tol = tol
+        self.fit_intercept = fit_intercept
+        self.penalty = penalty
+
+    @staticmethod
+    def _sigmoid(z):
+        pos = z >= 0
+        result = np.empty_like(z, dtype=float)
+        result[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
+        exp_z = np.exp(z[~pos])
+        result[~pos] = exp_z / (1.0 + exp_z)
+        return result
+
+    def _add_intercept(self, X):
+        if self.fit_intercept:
+            return np.hstack([np.ones((X.shape[0], 1)), X])
+        return X
+
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float)
+        X = self._add_intercept(X)
+        n_samples, n_features = X.shape
+        self.weights_ = np.zeros(n_features)
+        reg = 1.0 / self.C
+        prev_loss = np.inf
+        self.loss_history_ = []
+        for _ in range(self.max_iter):
+            z = X @ self.weights_
+            h = self._sigmoid(z)
+            eps = 1e-15
+            loss = (-1 / n_samples) * (
+                y @ np.log(h + eps) + (1 - y) @ np.log(1 - h + eps)
+            )
+            if self.penalty == "l2":
+                loss += 0.5 * reg * np.dot(self.weights_, self.weights_)
+                grad = (1 / n_samples) * (X.T @ (h - y)) + reg * self.weights_
+            elif self.penalty == "l1":
+                loss += reg * np.sum(np.abs(self.weights_))
+                grad = (1 / n_samples) * (X.T @ (h - y)) + reg * np.sign(self.weights_)
+            else:
+                grad = (1 / n_samples) * (X.T @ (h - y))
+            self.loss_history_.append(loss)
+            self.weights_ -= self.lr * grad
+            if abs(prev_loss - loss) < self.tol:
+                break
+            prev_loss = loss
+        return self
+
+    def predict_proba(self, X):
+        X = np.asarray(X, dtype=float)
+        X = self._add_intercept(X)
+        probs_1 = self._sigmoid(X @ self.weights_)
+        return np.column_stack([1 - probs_1, probs_1])
+
+    def predict(self, X):
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+
 class LeNet5(nn.Module):
     def __init__(self):
         super().__init__()
@@ -96,11 +163,13 @@ class DigitPredictorApp:
 
     def load_models_or_exit(self):
         try:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
             self.model = LeNet5()
-            self.model.load_state_dict(torch.load(app_path("lenet5_mnist.pth")))
+            self.model.load_state_dict(torch.load(app_path("lenet5_mnist.pth"), map_location=self.device))
             for param in self.model.parameters():
                 param.requires_grad = False
             self.model.eval()
+            self.model = self.model.to(self.device)
 
             with open(app_path("lr_models.pkl"), "rb") as f:
                 self.lr_models = pickle.load(f)
@@ -389,7 +458,7 @@ class DigitPredictorApp:
 
         arr = np.asarray(padded_32, dtype=np.float32) / 255.0
         arr = (arr - 0.1307) / 0.3081
-        tensor = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0)
+        tensor = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(self.device)
         return tensor, resized_28
 
     def inference_worker(self, image, request_id):
