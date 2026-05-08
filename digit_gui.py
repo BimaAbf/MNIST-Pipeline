@@ -441,25 +441,20 @@ class DigitPredictorApp:
         if bbox is None:
             return None, None
 
-        left, top, right, bottom = bbox
-        width = right - left
-        height = bottom - top
-        pad_x = int(width * 0.20)
-        pad_y = int(height * 0.20)
-        left = max(0, left - pad_x)
-        top = max(0, top - pad_y)
-        right = min(self.CANVAS_SIZE, right + pad_x)
-        bottom = min(self.CANVAS_SIZE, bottom + pad_y)
+        # Scale the full canvas down to 28×28 — no cropping, shape preserved as drawn
+        img_28 = image.resize((self.MNIST_SIZE, self.MNIST_SIZE), Image.Resampling.LANCZOS)
 
-        cropped = image.crop((left, top, right, bottom))
-        resized_28 = cropped.resize((self.MNIST_SIZE, self.MNIST_SIZE), Image.Resampling.LANCZOS)
-        padded_32 = Image.new("L", (self.PADDED_SIZE, self.PADDED_SIZE), 0)
-        padded_32.paste(resized_28, (2, 2))
+        arr = np.asarray(img_28, dtype=np.float32)
 
-        arr = np.asarray(padded_32, dtype=np.float32) / 255.0
-        arr = (arr - 0.1307) / 0.3081
-        tensor = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(self.device)
-        return tensor, resized_28
+        # Pad to 32×32 for LeNet-5
+        margin = (self.PADDED_SIZE - self.MNIST_SIZE) // 2
+        padded = np.zeros((self.PADDED_SIZE, self.PADDED_SIZE), dtype=np.float32)
+        padded[margin:margin + self.MNIST_SIZE, margin:margin + self.MNIST_SIZE] = arr
+
+        arr_norm = padded / 255.0
+        arr_norm = (arr_norm - 0.1307) / 0.3081
+        tensor = torch.from_numpy(arr_norm).unsqueeze(0).unsqueeze(0).to(self.device)
+        return tensor, img_28
 
     def inference_worker(self, image, request_id):
         with self.inference_lock:
