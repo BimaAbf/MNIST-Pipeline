@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image, ImageDraw, ImageTk
-import sklearn  # noqa: F401 - needed by pickle-loaded sklearn estimators
 
 
 APP_DIR = __file__.replace("\\", "/").rsplit("/", 1)[0]
@@ -20,19 +19,11 @@ def app_path(filename):
 
 
 class LogisticRegression:
-    def __init__(self, lr=0.01, max_iter=2000, C=1.0,
-                 tol=1e-6, fit_intercept=True,
-                 penalty="l2", random_state=None,
-                 solver=None):
-        self.lr = lr
-        self.max_iter = max_iter
-        self.C = C
-        self.tol = tol
-        self.fit_intercept = fit_intercept
-        self.penalty = penalty
+    """Inference-only logistic regression — models are loaded from pickle, not trained here."""
 
     @staticmethod
     def _sigmoid(z):
+        # Numerically stable sigmoid: split positive/negative to avoid overflow in exp()
         pos = z >= 0
         result = np.empty_like(z, dtype=float)
         result[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
@@ -41,54 +32,24 @@ class LogisticRegression:
         return result
 
     def _add_intercept(self, X):
-        if self.fit_intercept:
-            return np.hstack([np.ones((X.shape[0], 1)), X])
-        return X
-
-    def fit(self, X, y):
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y, dtype=float)
-        X = self._add_intercept(X)
-        n_samples, n_features = X.shape
-        self.weights_ = np.zeros(n_features)
-        reg = 1.0 / self.C
-        prev_loss = np.inf
-        self.loss_history_ = []
-        for _ in range(self.max_iter):
-            z = X @ self.weights_
-            h = self._sigmoid(z)
-            eps = 1e-15
-            loss = (-1 / n_samples) * (
-                y @ np.log(h + eps) + (1 - y) @ np.log(1 - h + eps)
-            )
-            if self.penalty == "l2":
-                loss += 0.5 * reg * np.dot(self.weights_, self.weights_)
-                grad = (1 / n_samples) * (X.T @ (h - y)) + reg * self.weights_
-            elif self.penalty == "l1":
-                loss += reg * np.sum(np.abs(self.weights_))
-                grad = (1 / n_samples) * (X.T @ (h - y)) + reg * np.sign(self.weights_)
-            else:
-                grad = (1 / n_samples) * (X.T @ (h - y))
-            self.loss_history_.append(loss)
-            self.weights_ -= self.lr * grad
-            if abs(prev_loss - loss) < self.tol:
-                break
-            prev_loss = loss
-        return self
+        # Prepend a column of 1s for the bias term
+        return np.hstack([np.ones((X.shape[0], 1)), X])
 
     def predict_proba(self, X):
         X = np.asarray(X, dtype=float)
         X = self._add_intercept(X)
         probs_1 = self._sigmoid(X @ self.weights_)
+        # Return [P(class=0), P(class=1)] per sample
         return np.column_stack([1 - probs_1, probs_1])
-
-    def predict(self, X):
-        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
 
 
 class LeNet5(nn.Module):
+    """LeNet-5 CNN — only extract_features() is used at inference time.
+    forward() and self.classifier exist so load_state_dict() can map all saved weights."""
+
     def __init__(self):
         super().__init__()
+        # Convolutional backbone: 1×32×32 → 16×5×5
         self.features = nn.Sequential(
             nn.Conv2d(1, 6, kernel_size=5),     # → 6 × 28 × 28
             nn.ReLU(),
@@ -97,12 +58,14 @@ class LeNet5(nn.Module):
             nn.ReLU(),
             nn.AvgPool2d(2, 2),                 # → 16 × 5 × 5
         )
+        # Fully-connected layers that produce the 84-d feature vector
         self.feature_fc = nn.Sequential(
             nn.Linear(16 * 5 * 5, 120),
             nn.ReLU(),
             nn.Linear(120, 84),
             nn.ReLU(),
         )
+        # Classification head — not used at inference, but needed for load_state_dict()
         self.classifier = nn.Linear(84, 10)
 
     def forward(self, x):
@@ -113,8 +76,9 @@ class LeNet5(nn.Module):
         return x
 
     def extract_features(self, x):
+        """Forward through backbone only — returns 84-d feature vector per image."""
         x = self.features(x)
-        x = x.view(x.size(0), -1)
+        x = x.view(x.size(0), -1)  # flatten: (batch, 16*5*5)
         x = self.feature_fc(x)
         return x  # shape: (batch, 84)
 
@@ -130,8 +94,6 @@ class DigitPredictorApp:
     MUTED = "#aeb6c2"
     BAR_BG = "#343946"
     BAR_FILL = "#4cc9f0"
-    GREEN = "#32d583"
-    RED = "#ff5c7a"
 
     def __init__(self, root):
         self.root = root
@@ -166,6 +128,7 @@ class DigitPredictorApp:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
             self.model = LeNet5()
             self.model.load_state_dict(torch.load(app_path("lenet5_mnist.pth"), map_location=self.device))
+            # Freeze all parameters — no training, inference only
             for param in self.model.parameters():
                 param.requires_grad = False
             self.model.eval()
@@ -198,6 +161,7 @@ class DigitPredictorApp:
         right = tk.Frame(main, bg=self.BG)
         right.grid(row=0, column=1, sticky="n", padx=(22, 0))
 
+        # ── Drawing canvas ──
         self.canvas = tk.Canvas(
             left,
             width=self.CANVAS_SIZE,
@@ -237,6 +201,7 @@ class DigitPredictorApp:
         )
         self.brush_slider.grid(row=1, column=0)
 
+        # ── 28×28 preview of what the model actually sees ──
         preview_box = tk.Frame(left, bg=self.BG)
         preview_box.grid(row=2, column=0, columnspan=3, pady=(16, 0))
         tk.Label(preview_box, text="Model preview", bg=self.BG, fg=self.MUTED).grid(row=0, column=0)
@@ -250,6 +215,7 @@ class DigitPredictorApp:
         )
         self.preview_label.grid(row=1, column=0, pady=(6, 0))
 
+        # ── Prediction display ──
         self.prediction_label = tk.Label(
             right,
             text="Draw a digit...",
@@ -261,6 +227,7 @@ class DigitPredictorApp:
         )
         self.prediction_label.grid(row=0, column=0, sticky="ew")
 
+        # ── Per-digit probability bar chart ──
         self.chart = tk.Frame(right, bg=self.BG)
         self.chart.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         self.prob_bars = []
@@ -297,6 +264,7 @@ class DigitPredictorApp:
         )
         self.top3_label.grid(row=3, column=0, sticky="ew", pady=(6, 0))
 
+        # ── Feedback panel for logging correct/wrong predictions ──
         feedback = tk.Frame(right, bg=self.PANEL, padx=12, pady=12)
         feedback.grid(row=4, column=0, sticky="ew", pady=(18, 0))
         tk.Label(feedback, text="Feedback", bg=self.PANEL, fg=self.TEXT, font=("Segoe UI", 12, "bold")).grid(
@@ -352,16 +320,15 @@ class DigitPredictorApp:
         x0, y0 = self.last_xy
         x1, y1 = event.x, event.y
         size = self.brush_size.get()
+        # Draw on the visible canvas
         self.canvas.create_line(
-            x0,
-            y0,
-            x1,
-            y1,
+            x0, y0, x1, y1,
             fill="white",
             width=size,
             capstyle=tk.ROUND,
             smooth=True,
         )
+        # Mirror the stroke onto the PIL image (used for model input)
         self.draw.line((x0, y0, x1, y1), fill=255, width=size)
         r = size // 2
         self.draw.ellipse((x1 - r, y1 - r, x1 + r, y1 + r), fill=255)
@@ -410,6 +377,7 @@ class DigitPredictorApp:
         self.update_preview(None)
 
     def schedule_prediction(self):
+        # Debounce: wait 300ms after last stroke before running inference
         if self.predict_after_id is not None:
             self.root.after_cancel(self.predict_after_id)
         self.predict_after_id = self.root.after(300, self.run_prediction)
@@ -423,6 +391,7 @@ class DigitPredictorApp:
             self.update_preview(None)
             return
 
+        # Run inference on a background thread to keep the UI responsive
         self.request_id += 1
         request_id = self.request_id
         image_copy = self.image.copy()
@@ -437,26 +406,29 @@ class DigitPredictorApp:
         return self.image.getbbox() is None
 
     def preprocess(self, image):
+        """Convert 280×280 canvas drawing → normalized 1×1×32×32 tensor for LeNet-5."""
         bbox = image.getbbox()
         if bbox is None:
             return None, None
 
-        # Scale the full canvas down to 28×28 — no cropping, shape preserved as drawn
+        # Downscale full canvas to 28×28 (MNIST native resolution)
         img_28 = image.resize((self.MNIST_SIZE, self.MNIST_SIZE), Image.Resampling.LANCZOS)
-
         arr = np.asarray(img_28, dtype=np.float32)
 
-        # Pad to 32×32 for LeNet-5
+        # Pad 28×28 → 32×32 with 2px border (LeNet-5 expects 32×32 input)
         margin = (self.PADDED_SIZE - self.MNIST_SIZE) // 2
         padded = np.zeros((self.PADDED_SIZE, self.PADDED_SIZE), dtype=np.float32)
         padded[margin:margin + self.MNIST_SIZE, margin:margin + self.MNIST_SIZE] = arr
 
+        # Normalize with MNIST global mean=0.1307 and std=0.3081
         arr_norm = padded / 255.0
         arr_norm = (arr_norm - 0.1307) / 0.3081
+        # Add batch and channel dimensions: (32,32) → (1,1,32,32)
         tensor = torch.from_numpy(arr_norm).unsqueeze(0).unsqueeze(0).to(self.device)
         return tensor, img_28
 
     def inference_worker(self, image, request_id):
+        """Background thread: preprocess → LeNet-5 features → 10 LR models → softmax."""
         with self.inference_lock:
             try:
                 tensor, preview = self.preprocess(image)
@@ -464,24 +436,29 @@ class DigitPredictorApp:
                     self.root.after(0, self.set_placeholder)
                     return
 
+                # Extract 84-d feature vector from LeNet-5 backbone
                 with torch.no_grad():
                     features = self.model.extract_features(tensor).cpu().numpy()
 
+                # Collect P(digit=k) from each of the 10 binary LR models
                 probs = []
                 for digit in range(10):
                     clf = self.lr_models[digit]
                     probs.append(float(clf.predict_proba(features)[:, 1][0]))
 
+                # Apply softmax to convert raw probabilities into a proper distribution
                 raw = np.asarray(probs, dtype=np.float64)
-                exps = np.exp(raw - np.max(raw))
+                exps = np.exp(raw - np.max(raw))  # subtract max for numerical stability
                 softmax = exps / np.sum(exps)
                 pred = int(np.argmax(softmax))
 
+                # Post result back to the UI thread
                 self.root.after(0, self.apply_prediction, request_id, pred, softmax, preview)
             except Exception as exc:
                 self.root.after(0, self.show_inference_error, str(exc))
 
     def apply_prediction(self, request_id, pred, probs, preview):
+        # Ignore stale results if a newer prediction was already requested
         if request_id != self.request_id:
             return
         self.latest_pred = pred
@@ -556,6 +533,7 @@ class DigitPredictorApp:
         self.root.after(500, self.clear_canvas)
 
     def log_feedback(self, predicted, actual, is_correct):
+        """Append prediction result to feedback_log.csv for tracking accuracy over time."""
         path = app_path("feedback_log.csv")
         try:
             with open(path, "r", newline="", encoding="utf-8"):
